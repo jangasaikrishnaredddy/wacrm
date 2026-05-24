@@ -25,7 +25,14 @@ import {
 interface TemplatePickerProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
-  onSelect: (template: MessageTemplate, params: string[]) => void;
+  onSelect: (
+    template: MessageTemplate,
+    payload: {
+      bodyParams: string[];
+      headerParams?: string[];
+      buttonParams?: { index: number; type: string; params: string[] }[];
+    },
+  ) => void;
 }
 
 // Meta numbers template placeholders from 1 ({{1}}, {{2}}, …) and the
@@ -48,6 +55,55 @@ function renderBodyPreview(body: string, params: string[]): string {
   });
 }
 
+interface TemplateField {
+  key: string;
+  label: string;
+  target: "body" | "header" | "button";
+  index: number;
+  buttonIndex?: number;
+  buttonType?: string;
+}
+
+function buildTemplateFields(template: MessageTemplate): TemplateField[] {
+  const fields: TemplateField[] = [];
+
+  for (const v of extractVariables(template.body_text)) {
+    fields.push({
+      key: `body-${v}`,
+      label: `Body variable {{${v}}}`,
+      target: "body",
+      index: v,
+    });
+  }
+
+  if (template.header_type === "text" && template.header_content) {
+    for (const v of extractVariables(template.header_content)) {
+      fields.push({
+        key: `header-${v}`,
+        label: `Header variable {{${v}}}`,
+        target: "header",
+        index: v,
+      });
+    }
+  }
+
+  for (const [buttonIndex, button] of (template.buttons ?? []).entries()) {
+    if ((button.type ?? "").toUpperCase() !== "URL" || !button.url) continue;
+    for (const v of extractVariables(button.url)) {
+      fields.push({
+        key: `button-${buttonIndex}-${v}`,
+        label: `Button ${buttonIndex + 1} variable {{${v}}}`,
+        target: "button",
+        index: v,
+        buttonIndex,
+        buttonType: "url",
+      });
+    }
+  }
+
+  return fields;
+}
+
 export function TemplatePicker({
   open,
   onOpenChange,
@@ -56,7 +112,7 @@ export function TemplatePicker({
   const [templates, setTemplates] = useState<MessageTemplate[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<MessageTemplate | null>(null);
-  const [params, setParams] = useState<string[]>([]);
+  const [paramValues, setParamValues] = useState<Record<string, string>>({});
 
   useEffect(() => {
     if (!open) return;
@@ -105,32 +161,62 @@ export function TemplatePicker({
   function handleOpenChange(next: boolean) {
     if (!next) {
       setSelected(null);
-      setParams([]);
+      setParamValues({});
     }
     onOpenChange(next);
   }
 
   function pickTemplate(template: MessageTemplate) {
-    const vars = extractVariables(template.body_text);
-    if (vars.length === 0) {
-      onSelect(template, []);
+    const fields = buildTemplateFields(template);
+    if (fields.length === 0) {
+      onSelect(template, { bodyParams: [] });
       handleOpenChange(false);
       return;
     }
     setSelected(template);
-    setParams(new Array(vars.length).fill(""));
+    setParamValues(
+      Object.fromEntries(fields.map((field) => [field.key, ""])),
+    );
   }
 
   function confirm() {
     if (!selected) return;
-    onSelect(selected, params);
+    const fields = buildTemplateFields(selected);
+    const bodyParams = fields
+      .filter((field) => field.target === "body")
+      .sort((a, b) => a.index - b.index)
+      .map((field) => paramValues[field.key] ?? "");
+    const headerParams = fields
+      .filter((field) => field.target === "header")
+      .sort((a, b) => a.index - b.index)
+      .map((field) => paramValues[field.key] ?? "");
+    const buttonParams = Array.from(
+      new Map(
+        fields
+          .filter((field) => field.target === "button")
+          .map((field) => [field.buttonIndex ?? -1, field.buttonType ?? "url"]),
+      ),
+    ).map(([buttonIndex, type]) => ({
+      index: buttonIndex,
+      type,
+      params: fields
+        .filter((field) => field.target === "button" && field.buttonIndex === buttonIndex)
+        .sort((a, b) => a.index - b.index)
+        .map((field) => paramValues[field.key] ?? ""),
+    }));
+
+    onSelect(selected, {
+      bodyParams,
+      headerParams: headerParams.length > 0 ? headerParams : undefined,
+      buttonParams: buttonParams.length > 0 ? buttonParams : undefined,
+    });
     handleOpenChange(false);
   }
 
-  const variables = selected ? extractVariables(selected.body_text) : [];
+  const fields = selected ? buildTemplateFields(selected) : [];
   const canConfirm =
     !!selected &&
-    variables.every((_, i) => (params[i] ?? "").trim().length > 0);
+    fields.every((field) => (paramValues[field.key] ?? "").trim().length > 0);
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -199,7 +285,13 @@ export function TemplatePicker({
             <div className="rounded-md border border-slate-800 bg-slate-950/50 p-3">
               <p className="mb-1 text-xs text-slate-400">Preview</p>
               <p className="whitespace-pre-wrap text-sm text-slate-200">
-                {renderBodyPreview(selected.body_text, params)}
+                {renderBodyPreview(
+                  selected.body_text,
+                  fields
+                    .filter((field) => field.target === "body")
+                    .sort((a, b) => a.index - b.index)
+                    .map((field) => paramValues[field.key] ?? ""),
+                )}
               </p>
               {selected.footer_text && (
                 <p className="mt-2 text-xs italic text-slate-500">
@@ -207,17 +299,18 @@ export function TemplatePicker({
                 </p>
               )}
             </div>
-            {variables.map((v, i) => (
-              <div key={v} className="space-y-1">
-                <Label className="text-xs text-slate-300">{`Variable {{${v}}}`}</Label>
+            {fields.map((field) => (
+              <div key={field.key} className="space-y-1">
+                <Label className="text-xs text-slate-300">{field.label}</Label>
                 <Input
-                  value={params[i] ?? ""}
+                  value={paramValues[field.key] ?? ""}
                   onChange={(e) => {
-                    const next = [...params];
-                    next[i] = e.target.value;
-                    setParams(next);
+                    setParamValues((current) => ({
+                      ...current,
+                      [field.key]: e.target.value,
+                    }));
                   }}
-                  placeholder={`Value for {{${v}}}`}
+                  placeholder={field.label}
                   className="border-slate-700 bg-slate-800 text-white placeholder:text-slate-500"
                 />
               </div>
@@ -232,7 +325,7 @@ export function TemplatePicker({
                 variant="outline"
                 onClick={() => {
                   setSelected(null);
-                  setParams([]);
+                  setParamValues({});
                 }}
                 className="border-slate-700 text-slate-300 hover:bg-slate-800"
               >

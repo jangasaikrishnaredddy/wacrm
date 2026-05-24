@@ -493,10 +493,26 @@ export function MessageThread({
   }, []);
 
   const handleSendTemplate = useCallback(
-    async (template: MessageTemplate, params: string[]) => {
+    async (
+      template: MessageTemplate,
+      templatePayload: {
+        bodyParams: string[];
+        headerParams?: string[];
+        buttonParams?: { index: number; type: string; params: string[] }[];
+      },
+    ) => {
       if (!conversation) return;
+      if (
+        (template.header_type === "image" ||
+          template.header_type === "video" ||
+          template.header_type === "document") &&
+        !template.header_content
+      ) {
+        toast.error("This template is missing its header media URL in the database.");
+        return;
+      }
 
-      const renderedBody = renderTemplateBody(template.body_text, params);
+      const renderedBody = renderTemplateBody(template.body_text, templatePayload.bodyParams);
       const tempId = `temp-${Date.now()}`;
 
       const optimisticMsg: Message = {
@@ -519,7 +535,82 @@ export function MessageThread({
             conversation_id: conversation.id,
             message_type: "template",
             template_name: template.name,
-            template_params: params,
+            template_language: template.language ?? "en_US",
+            template_params: templatePayload.bodyParams,
+            template_components: [
+              ...(template.header_type === "text" &&
+              templatePayload.headerParams &&
+              templatePayload.headerParams.length > 0
+                ? [
+                    {
+                      type: "header",
+                      parameters: templatePayload.headerParams.map((value) => ({
+                        type: "text",
+                        text: String(value),
+                      })),
+                    },
+                  ]
+                : []),
+              ...(template.header_type === "image" && template.header_content
+                ? [
+                    {
+                      type: "header",
+                      parameters: [
+                        {
+                          type: "image",
+                          image: { link: template.header_content },
+                        },
+                      ],
+                    },
+                  ]
+                : []),
+              ...(template.header_type === "video" && template.header_content
+                ? [
+                    {
+                      type: "header",
+                      parameters: [
+                        {
+                          type: "video",
+                          video: { link: template.header_content },
+                        },
+                      ],
+                    },
+                  ]
+                : []),
+              ...(template.header_type === "document" && template.header_content
+                ? [
+                    {
+                      type: "header",
+                      parameters: [
+                        {
+                          type: "document",
+                          document: { link: template.header_content },
+                        },
+                      ],
+                    },
+                  ]
+                : []),
+              ...(templatePayload.bodyParams.length > 0
+                ? [
+                    {
+                      type: "body",
+                      parameters: templatePayload.bodyParams.map((value) => ({
+                        type: "text",
+                        text: String(value),
+                      })),
+                    },
+                  ]
+                : []),
+              ...((templatePayload.buttonParams ?? []).map((button) => ({
+                type: "button",
+                sub_type: button.type,
+                index: String(button.index),
+                parameters: button.params.map((value) => ({
+                  type: "text",
+                  text: String(value),
+                })),
+              })) as Array<Record<string, unknown>>),
+            ],
             content_text: renderedBody,
           }),
         });

@@ -150,7 +150,13 @@ export interface MessageTemplate {
   header_content?: string;
   body_text: string;
   footer_text?: string;
-  buttons?: Record<string, unknown>[];
+  buttons?: {
+    type?: string;
+    text?: string;
+    url?: string;
+    phone_number?: string;
+    example?: string[];
+  }[];
   status?: 'Draft' | 'Pending' | 'Approved' | 'Rejected';
   created_at: string;
 }

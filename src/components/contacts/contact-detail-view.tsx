@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { toast } from 'sonner';
 import type { Contact, Tag, ContactTag, ContactNote, CustomField, ContactCustomValue, Deal } from '@/types';
@@ -31,6 +32,7 @@ import {
   Save,
   X,
   DollarSign,
+  MessageSquare,
 } from 'lucide-react';
 
 interface ContactDetailViewProps {
@@ -46,11 +48,13 @@ export function ContactDetailView({
   contactId,
   onUpdated,
 }: ContactDetailViewProps) {
+  const router = useRouter();
   const supabase = createClient();
 
   const [contact, setContact] = useState<Contact | null>(null);
   const [loading, setLoading] = useState(false);
   const [copiedPhone, setCopiedPhone] = useState(false);
+  const [openingConversation, setOpeningConversation] = useState(false);
 
   // Details tab
   const [editName, setEditName] = useState('');
@@ -313,6 +317,60 @@ export function ContactDetailView({
     setSavingCustom(false);
   }
 
+  async function openConversation() {
+    if (!contact) return;
+    setOpeningConversation(true);
+    try {
+      const {
+        data: { user },
+        error: userError,
+      } = await supabase.auth.getUser();
+
+      if (userError || !user) {
+        toast.error('Not authenticated');
+        return;
+      }
+
+      const { data: existing, error: findError } = await supabase
+        .from('conversations')
+        .select('id')
+        .eq('user_id', user.id)
+        .eq('contact_id', contact.id)
+        .maybeSingle();
+
+      if (findError) {
+        throw findError;
+      }
+
+      let conversationId = existing?.id;
+
+      if (!conversationId) {
+        const { data: created, error: createError } = await supabase
+          .from('conversations')
+          .insert({
+            user_id: user.id,
+            contact_id: contact.id,
+          })
+          .select('id')
+          .single();
+
+        if (createError || !created) {
+          throw createError ?? new Error('Failed to create conversation');
+        }
+
+        conversationId = created.id;
+      }
+
+      onOpenChange(false);
+      router.push(`/inbox?c=${conversationId}`);
+    } catch (error) {
+      console.error('Failed to open conversation:', error);
+      toast.error('Failed to open conversation');
+    } finally {
+      setOpeningConversation(false);
+    }
+  }
+
   function getInitials(name?: string | null) {
     if (!name) return '?';
     return name
@@ -377,6 +435,20 @@ export function ContactDetailView({
                     )}
                   </div>
                 </div>
+                <Button
+                  type="button"
+                  size="sm"
+                  onClick={openConversation}
+                  disabled={openingConversation}
+                  className="bg-primary hover:bg-primary/90 text-primary-foreground"
+                >
+                  {openingConversation ? (
+                    <Loader2 className="size-3.5 animate-spin" />
+                  ) : (
+                    <MessageSquare className="size-3.5" />
+                  )}
+                  Message
+                </Button>
               </div>
             </SheetHeader>
 

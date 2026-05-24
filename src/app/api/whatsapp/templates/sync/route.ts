@@ -37,6 +37,13 @@ interface MetaTemplateComponent {
   type: string
   text?: string
   format?: string
+  buttons?: Array<{
+    type?: string
+    text?: string
+    url?: string
+    phone_number?: string
+    example?: string[]
+  }>
 }
 
 interface MetaTemplate {
@@ -130,9 +137,12 @@ export async function POST() {
     // at 20 pages (2k templates) as a safety against infinite loops
     // from a misbehaving upstream.
     const metaTemplates: MetaTemplate[] = []
+
     let nextUrl:
       | string
       | null = `${META_API_BASE}/${config.waba_id}/message_templates?limit=100&fields=id,name,language,status,category,components`
+
+      console.log(nextUrl,"nextUrl")
     const PAGE_CAP = 20
     let pageCount = 0
 
@@ -171,6 +181,7 @@ export async function POST() {
       const body = (t.components ?? []).find((c) => c.type === 'BODY')
       const header = (t.components ?? []).find((c) => c.type === 'HEADER')
       const footer = (t.components ?? []).find((c) => c.type === 'FOOTER')
+      const buttons = (t.components ?? []).find((c) => c.type === 'BUTTONS')
 
       const row = {
         user_id: user.id,
@@ -181,6 +192,7 @@ export async function POST() {
         header_content: header?.text ?? null,
         body_text: body?.text ?? '',
         footer_text: footer?.text ?? null,
+        buttons: buttons?.buttons ?? null,
         status: normalizeStatus(t.status),
         updated_at: new Date().toISOString(),
       }
