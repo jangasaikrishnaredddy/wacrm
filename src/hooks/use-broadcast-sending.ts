@@ -13,10 +13,11 @@ export interface CustomFieldFilter {
 }
 
 export interface AudienceConfig {
-  type: 'all' | 'tags' | 'custom_field' | 'csv';
+  type: 'all' | 'tags' | 'custom_field' | 'csv' | 'selected_contacts';
   tagIds?: string[];
   customField?: CustomFieldFilter;
   csvContacts?: { phone: string; name?: string }[];
+  contactIds?: string[];
   /** Contacts carrying any of these tags are subtracted from the result. */
   excludeTagIds?: string[];
 }
@@ -32,6 +33,12 @@ export type VariableMapping =
   | { type: 'static'; value: string }
   | { type: 'field'; value: string }
   | { type: 'custom_field'; value: string };
+
+export interface TemplateTextParameter {
+  type: 'text'
+  text: string
+  parameter_name?: string
+}
 
 interface BroadcastPayload {
   name: string;
@@ -109,6 +116,26 @@ export function resolveVariables(
   });
 }
 
+export function resolveTemplateParameters(
+  variables: Record<string, VariableMapping>,
+  contact: Contact,
+  customValues?: Map<string, string>,
+): TemplateTextParameter[] {
+  const keys = Object.keys(variables).sort((a, b) => {
+    const an = Number(a);
+    const bn = Number(b);
+    if (Number.isFinite(an) && Number.isFinite(bn)) return an - bn;
+    return a.localeCompare(b);
+  });
+
+  return keys.map((key) => {
+    const [text] = resolveVariables({ [key]: variables[key] }, contact, customValues)
+    return /^\d+$/.test(key)
+      ? { type: 'text', text }
+      : { type: 'text', text, parameter_name: key }
+  })
+}
+
 /**
  * Bulk-fetch contact_custom_values for a set of contacts. Returns an
  * index keyed by contact_id → field_id → value.
@@ -180,6 +207,17 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
       contacts = await resolveCustomFieldAudience(supabase, audience.customField);
     } else if (audience.type === 'csv' && audience.csvContacts) {
       contacts = await upsertCsvContacts(supabase, audience.csvContacts);
+    } else if (
+      audience.type === 'selected_contacts' &&
+      audience.contactIds &&
+      audience.contactIds.length > 0
+    ) {
+      const { data, error } = await supabase
+        .from('contacts')
+        .select('*')
+        .in('id', audience.contactIds);
+      if (error) throw new Error(`Failed to fetch selected contacts: ${error.message}`);
+      contacts = data ?? [];
     }
 
     // Apply exclude tags (works across all contact-derived audience
@@ -349,6 +387,7 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
             type: payload.audience.type,
             tagIds: payload.audience.tagIds,
             customField: payload.audience.customField,
+            contactIds: payload.audience.contactIds,
             excludeTagIds: payload.audience.excludeTagIds,
           },
           status: 'sending',
@@ -433,6 +472,13 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
             phone: r.contact!.phone as string,
             params: r.contact
               ? resolveVariables(
+                  payload.variables,
+                  r.contact,
+                  customValueIndex.get(r.contact.id),
+                )
+              : [],
+            body_parameter_objects: r.contact
+              ? resolveTemplateParameters(
                   payload.variables,
                   r.contact,
                   customValueIndex.get(r.contact.id),

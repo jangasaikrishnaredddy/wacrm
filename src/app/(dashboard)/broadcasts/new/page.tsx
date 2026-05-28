@@ -1,7 +1,7 @@
 'use client';
 
 import { useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { toast } from 'sonner';
 import { MessageTemplate } from '@/types';
@@ -21,12 +21,17 @@ const steps = [
 
 export default function NewBroadcastPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { createAndSendBroadcast, isProcessing, progress } = useBroadcastSending();
+  const preselectedContactIds = (searchParams.get('contactIds') ?? '')
+    .split(',')
+    .map((id) => id.trim())
+    .filter(Boolean);
 
   const [currentStep, setCurrentStep] = useState(0);
   const [template, setTemplate] = useState<MessageTemplate | null>(null);
   const [audience, setAudience] = useState<{
-    type: 'all' | 'tags' | 'custom_field' | 'csv';
+    type: 'all' | 'tags' | 'custom_field' | 'csv' | 'selected_contacts';
     tagIds?: string[];
     customField?: {
       fieldId: string;
@@ -34,12 +39,25 @@ export default function NewBroadcastPage() {
       value: string;
     };
     csvContacts?: { phone: string; name?: string }[];
+    contactIds?: string[];
     excludeTagIds?: string[];
-  }>({ type: 'all' });
+  }>(
+    preselectedContactIds.length > 0
+      ? { type: 'selected_contacts', contactIds: preselectedContactIds }
+      : { type: 'all' }
+  );
   const [variables, setVariables] = useState<
     Record<string, { type: 'static' | 'field' | 'custom_field'; value: string }>
   >({});
   const [name, setName] = useState('');
+  const effectiveAudience =
+    preselectedContactIds.length > 0 && audience.type === 'all'
+      ? {
+          ...audience,
+          type: 'selected_contacts' as const,
+          contactIds: preselectedContactIds,
+        }
+      : audience;
 
   async function handleSend() {
     if (!template) return;
@@ -49,11 +67,12 @@ export default function NewBroadcastPage() {
         name,
         template,
         audience: {
-          type: audience.type,
-          tagIds: audience.tagIds,
-          customField: audience.customField,
-          csvContacts: audience.csvContacts,
-          excludeTagIds: audience.excludeTagIds,
+          type: effectiveAudience.type,
+          tagIds: effectiveAudience.tagIds,
+          customField: effectiveAudience.customField,
+          csvContacts: effectiveAudience.csvContacts,
+          contactIds: effectiveAudience.contactIds,
+          excludeTagIds: effectiveAudience.excludeTagIds,
         },
         variables,
       });
@@ -98,8 +117,9 @@ export default function NewBroadcastPage() {
       template_language: template.language ?? 'en_US',
       template_variables: variables,
       audience_filter: {
-        type: audience.type,
-        tagIds: audience.tagIds,
+        type: effectiveAudience.type,
+        tagIds: effectiveAudience.tagIds,
+        contactIds: effectiveAudience.contactIds,
       },
       status: 'draft',
       total_recipients: 0,
@@ -187,7 +207,7 @@ export default function NewBroadcastPage() {
           )}
           {currentStep === 1 && (
             <Step2SelectAudience
-              audience={audience}
+              audience={effectiveAudience}
               onUpdate={setAudience}
               onNext={() => setCurrentStep(2)}
               onBack={() => setCurrentStep(0)}
@@ -207,7 +227,7 @@ export default function NewBroadcastPage() {
               name={name}
               onNameChange={setName}
               template={template}
-              audience={audience}
+              audience={effectiveAudience}
               onSend={handleSend}
               onSaveDraft={handleSaveDraft}
               onBack={() => setCurrentStep(2)}

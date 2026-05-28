@@ -171,6 +171,8 @@ export async function sendTemplateMessage(
     body.context = { message_id: contextMessageId }
   }
 
+  console.log('[whatsapp/template] outbound payload:', JSON.stringify(body, null, 2))
+
   const response = await fetch(url, {
     method: 'POST',
     headers: {

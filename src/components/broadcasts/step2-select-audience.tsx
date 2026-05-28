@@ -2,7 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import { createClient } from '@/lib/supabase/client';
-import { CustomField, Tag } from '@/types';
+import { Contact, CustomField, Tag } from '@/types';
 import { Button } from '@/components/ui/button';
 import {
   Users,
@@ -15,7 +15,7 @@ import {
   X,
 } from 'lucide-react';
 
-type AudienceType = 'all' | 'tags' | 'custom_field' | 'csv';
+type AudienceType = 'all' | 'tags' | 'custom_field' | 'csv' | 'selected_contacts';
 type CustomFieldOperator = 'is' | 'is_not' | 'contains';
 
 interface CustomFieldFilter {
@@ -29,6 +29,7 @@ interface AudienceConfig {
   tagIds?: string[];
   customField?: CustomFieldFilter;
   csvContacts?: { phone: string; name?: string }[];
+  contactIds?: string[];
   excludeTagIds?: string[];
 }
 
@@ -45,6 +46,12 @@ const audienceOptions: {
   description: string;
   icon: typeof Users;
 }[] = [
+  {
+    type: 'selected_contacts',
+    label: 'Selected Contacts',
+    description: 'Send only to contacts picked from the Contacts page',
+    icon: Users,
+  },
   {
     type: 'all',
     label: 'All Contacts',
@@ -89,6 +96,7 @@ export function Step2SelectAudience({
   const [loadingFields, setLoadingFields] = useState(false);
   const [estimatedCount, setEstimatedCount] = useState<number | null>(null);
   const [loadingCount, setLoadingCount] = useState(false);
+  const [selectedContactsPreview, setSelectedContactsPreview] = useState<Contact[]>([]);
 
   // Tags are used both by the primary "Filter by Tags" audience type
   // AND by the exclude-list below — so always load once on mount.
@@ -124,6 +132,28 @@ export function Step2SelectAudience({
     }
     fetchFields();
   }, [audience.type]);
+
+  useEffect(() => {
+    if (audience.type !== 'selected_contacts' || !audience.contactIds?.length) {
+      setSelectedContactsPreview([]);
+      return;
+    }
+    let cancelled = false;
+    async function fetchSelectedContacts() {
+      const supabase = createClient();
+      const { data } = await supabase
+        .from('contacts')
+        .select('id, user_id, phone, name, email, company, avatar_url, created_at, updated_at')
+        .in('id', audience.contactIds ?? []);
+      if (!cancelled) {
+        setSelectedContactsPreview((data as Contact[]) ?? []);
+      }
+    }
+    fetchSelectedContacts();
+    return () => {
+      cancelled = true;
+    };
+  }, [audience.type, audience.contactIds]);
 
   const fetchEstimatedCount = useCallback(async () => {
     setLoadingCount(true);
@@ -167,6 +197,13 @@ export function Step2SelectAudience({
       ) {
         setEstimatedCount(audience.csvContacts.length);
         return;
+      } else if (
+        audience.type === 'selected_contacts' &&
+        audience.contactIds &&
+        audience.contactIds.length > 0
+      ) {
+        setEstimatedCount(audience.contactIds.length);
+        return;
       } else {
         // Partially-configured audience — wait for the user to finish.
         setEstimatedCount(null);
@@ -204,6 +241,7 @@ export function Step2SelectAudience({
     audience.tagIds,
     audience.customField,
     audience.csvContacts,
+    audience.contactIds,
     audience.excludeTagIds,
   ]);
 
@@ -244,7 +282,10 @@ export function Step2SelectAudience({
       audience.customField.value.length > 0) ||
     (audience.type === 'csv' &&
       audience.csvContacts &&
-      audience.csvContacts.length > 0);
+      audience.csvContacts.length > 0) ||
+    (audience.type === 'selected_contacts' &&
+      audience.contactIds &&
+      audience.contactIds.length > 0);
 
   return (
     <div className="space-y-6">
@@ -275,6 +316,10 @@ export function Step2SelectAudience({
                       : undefined,
                   csvContacts:
                     option.type === 'csv' ? audience.csvContacts : undefined,
+                  contactIds:
+                    option.type === 'selected_contacts'
+                      ? audience.contactIds
+                      : undefined,
                 })
               }
               className={`flex items-start gap-3 rounded-xl border p-4 text-left transition-all ${
@@ -384,6 +429,38 @@ export function Step2SelectAudience({
                 placeholder="Value"
                 className="h-9 rounded-lg border border-slate-700 bg-slate-800 px-2.5 text-sm text-white outline-none placeholder:text-slate-500 focus:border-primary focus:ring-1 focus:ring-primary"
               />
+            </div>
+          )}
+        </div>
+      )}
+
+      {audience.type === 'selected_contacts' && (
+        <div className="rounded-xl border border-slate-800 bg-slate-900/50 p-4">
+          <p className="mb-3 text-sm font-medium text-white">Selected Contacts</p>
+          {!audience.contactIds || audience.contactIds.length === 0 ? (
+            <p className="text-xs text-slate-400">
+              No contacts were preselected. Go back to Contacts, select rows, then use Bulk Message.
+            </p>
+          ) : (
+            <div className="space-y-2">
+              <p className="text-xs text-slate-400">
+                {audience.contactIds.length} contacts selected from the Contacts page.
+              </p>
+              <div className="flex flex-wrap gap-2">
+                {selectedContactsPreview.slice(0, 8).map((contact) => (
+                  <span
+                    key={contact.id}
+                    className="inline-flex items-center rounded-full border border-slate-700 bg-slate-800 px-3 py-1 text-xs text-slate-200"
+                  >
+                    {contact.name || contact.phone}
+                  </span>
+                ))}
+                {selectedContactsPreview.length > 8 && (
+                  <span className="inline-flex items-center rounded-full border border-slate-700 bg-slate-800 px-3 py-1 text-xs text-slate-400">
+                    +{selectedContactsPreview.length - 8} more
+                  </span>
+                )}
+              </div>
             </div>
           )}
         </div>

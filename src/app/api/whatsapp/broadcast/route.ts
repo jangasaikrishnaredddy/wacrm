@@ -46,6 +46,11 @@ interface BroadcastResult {
 interface NewRecipient {
   phone: string
   params?: string[]
+  body_parameter_objects?: Array<{
+    type: 'text'
+    text: string
+    parameter_name?: string
+  }>
 }
 
 export async function POST(request: Request) {
@@ -124,6 +129,20 @@ export async function POST(request: Request) {
     }
 
     const accessToken = decrypt(config.access_token)
+    const { data: templateRow, error: templateError } = await supabase
+      .from('message_templates')
+      .select('header_type, header_content')
+      .eq('user_id', user.id)
+      .eq('name', template_name)
+      .eq('language', template_language || 'en_US')
+      .maybeSingle()
+
+    if (templateError) {
+      return NextResponse.json(
+        { error: `Failed to load template metadata: ${templateError.message}` },
+        { status: 400 }
+      )
+    }
 
     const results: BroadcastResult[] = []
     let sentCount = 0
@@ -150,6 +169,45 @@ export async function POST(request: Request) {
 
       for (const variant of variants) {
         try {
+          const mediaHeaderComponent =
+            templateRow?.header_type === 'image' && templateRow.header_content
+              ? [
+                  {
+                    type: 'header',
+                    parameters: [
+                      {
+                        type: 'image',
+                        image: { link: templateRow.header_content },
+                      },
+                    ],
+                  },
+                ]
+              : templateRow?.header_type === 'video' && templateRow.header_content
+                ? [
+                    {
+                      type: 'header',
+                      parameters: [
+                        {
+                          type: 'video',
+                          video: { link: templateRow.header_content },
+                        },
+                      ],
+                    },
+                  ]
+                : templateRow?.header_type === 'document' && templateRow.header_content
+                  ? [
+                      {
+                        type: 'header',
+                        parameters: [
+                          {
+                            type: 'document',
+                            document: { link: templateRow.header_content },
+                          },
+                        ],
+                      },
+                    ]
+                  : []
+
           const result = await sendTemplateMessage({
             phoneNumberId: config.phone_number_id,
             accessToken,
@@ -157,6 +215,19 @@ export async function POST(request: Request) {
             templateName: template_name,
             language: template_language || 'en_US',
             params: recipient.params ?? [],
+            components:
+              recipient.body_parameter_objects &&
+              recipient.body_parameter_objects.length > 0
+                ? [
+                    ...mediaHeaderComponent,
+                    {
+                      type: 'body',
+                      parameters: recipient.body_parameter_objects,
+                    },
+                  ]
+                : mediaHeaderComponent.length > 0
+                  ? mediaHeaderComponent
+                  : undefined,
           })
           sentMessageId = result.messageId
           lastError = null

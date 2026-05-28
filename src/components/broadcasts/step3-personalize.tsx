@@ -62,6 +62,21 @@ export function Step3Personalize({
   >(new Map());
   const [loadingPreview, setLoadingPreview] = useState(true);
 
+  function extractPlaceholders(text: string): string[] {
+    const seen = new Set<string>();
+    const tokens: string[] = [];
+    for (const match of text.matchAll(/\{\{\s*([^}]+?)\s*\}\}/g)) {
+      const token = String(match[1]).trim();
+      if (!token || seen.has(token)) continue;
+      seen.add(token);
+      tokens.push(token);
+    }
+    if (tokens.every((token) => /^\d+$/.test(token))) {
+      return tokens.sort((a, b) => Number(a) - Number(b));
+    }
+    return tokens;
+  }
+
   // Load user's custom fields + a representative contact for the
   // live preview. Fall back to sample data if no contacts exist yet.
   useEffect(() => {
@@ -106,9 +121,7 @@ export function Step3Personalize({
   }, []);
 
   const placeholders = useMemo(() => {
-    const matches = template.body_text.match(/\{\{(\d+)\}\}/g);
-    if (!matches) return [];
-    return [...new Set(matches)].sort();
+    return extractPlaceholders(template.body_text).map((token) => `{{${token}}}`);
   }, [template.body_text]);
 
   /**

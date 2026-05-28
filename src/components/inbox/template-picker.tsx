@@ -29,8 +29,13 @@ interface TemplatePickerProps {
     template: MessageTemplate,
     payload: {
       bodyParams: string[];
-      headerParams?: string[];
-      buttonParams?: { index: number; type: string; params: string[] }[];
+      bodyParameterObjects?: Array<{ type: "text"; text: string; parameter_name?: string }>;
+      headerParameterObjects?: Array<{ type: "text"; text: string; parameter_name?: string }>;
+      buttonParams?: {
+        index: number;
+        type: string;
+        params: Array<{ type: "text"; text: string; parameter_name?: string }>;
+      }[];
     },
   ) => void;
 }
@@ -39,19 +44,30 @@ interface TemplatePickerProps {
 // indices passed to the Graph API must be contiguous starting at 1.
 // We sort + dedupe here so a body using only {{2}} still drives a single
 // input slot, and so render-order matches send-order.
-function extractVariables(body: string): number[] {
-  const ids = new Set<number>();
-  for (const m of body.matchAll(/\{\{(\d+)\}\}/g)) {
-    ids.add(Number(m[1]));
+function extractVariables(body: string): string[] {
+  const seen = new Set<string>();
+  const tokens: string[] = [];
+  for (const m of body.matchAll(/\{\{\s*([^}]+?)\s*\}\}/g)) {
+    const token = String(m[1]).trim();
+    if (!token || seen.has(token)) continue;
+    seen.add(token);
+    tokens.push(token);
   }
-  return Array.from(ids).sort((a, b) => a - b);
+  if (tokens.every((token) => /^\d+$/.test(token))) {
+    return tokens.sort((a, b) => Number(a) - Number(b));
+  }
+  return tokens;
 }
 
 function renderBodyPreview(body: string, params: string[]): string {
-  return body.replace(/\{\{(\d+)\}\}/g, (_, raw) => {
-    const idx = Number(raw) - 1;
+  const variables = extractVariables(body);
+  const indexByToken = new Map(variables.map((token, idx) => [token, idx]));
+  return body.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_, raw) => {
+    const token = String(raw).trim();
+    const idx = indexByToken.get(token);
+    if (idx === undefined) return `{{${token}}}`;
     const value = params[idx];
-    return value && value.trim().length > 0 ? value : `{{${raw}}}`;
+    return value && value.trim().length > 0 ? value : `{{${token}}}`;
   });
 }
 
@@ -59,42 +75,52 @@ interface TemplateField {
   key: string;
   label: string;
   target: "body" | "header" | "button";
-  index: number;
+  token: string;
+  order: number;
   buttonIndex?: number;
   buttonType?: string;
+}
+
+function buildTextParameter(token: string, text: string) {
+  return /^\d+$/.test(token)
+    ? { type: "text" as const, text }
+    : { type: "text" as const, text, parameter_name: token };
 }
 
 function buildTemplateFields(template: MessageTemplate): TemplateField[] {
   const fields: TemplateField[] = [];
 
-  for (const v of extractVariables(template.body_text)) {
+  for (const [order, v] of extractVariables(template.body_text).entries()) {
     fields.push({
       key: `body-${v}`,
       label: `Body variable {{${v}}}`,
       target: "body",
-      index: v,
+      token: v,
+      order,
     });
   }
 
   if (template.header_type === "text" && template.header_content) {
-    for (const v of extractVariables(template.header_content)) {
+    for (const [order, v] of extractVariables(template.header_content).entries()) {
       fields.push({
         key: `header-${v}`,
         label: `Header variable {{${v}}}`,
         target: "header",
-        index: v,
+        token: v,
+        order,
       });
     }
   }
 
   for (const [buttonIndex, button] of (template.buttons ?? []).entries()) {
     if ((button.type ?? "").toUpperCase() !== "URL" || !button.url) continue;
-    for (const v of extractVariables(button.url)) {
+    for (const [order, v] of extractVariables(button.url).entries()) {
       fields.push({
         key: `button-${buttonIndex}-${v}`,
         label: `Button ${buttonIndex + 1} variable {{${v}}}`,
         target: "button",
-        index: v,
+        token: v,
+        order,
         buttonIndex,
         buttonType: "url",
       });
@@ -184,12 +210,16 @@ export function TemplatePicker({
     const fields = buildTemplateFields(selected);
     const bodyParams = fields
       .filter((field) => field.target === "body")
-      .sort((a, b) => a.index - b.index)
+      .sort((a, b) => a.order - b.order)
       .map((field) => paramValues[field.key] ?? "");
-    const headerParams = fields
+    const bodyParameterObjects = fields
+      .filter((field) => field.target === "body")
+      .sort((a, b) => a.order - b.order)
+      .map((field) => buildTextParameter(field.token, paramValues[field.key] ?? ""));
+    const headerParameterObjects = fields
       .filter((field) => field.target === "header")
-      .sort((a, b) => a.index - b.index)
-      .map((field) => paramValues[field.key] ?? "");
+      .sort((a, b) => a.order - b.order)
+      .map((field) => buildTextParameter(field.token, paramValues[field.key] ?? ""));
     const buttonParams = Array.from(
       new Map(
         fields
@@ -201,13 +231,16 @@ export function TemplatePicker({
       type,
       params: fields
         .filter((field) => field.target === "button" && field.buttonIndex === buttonIndex)
-        .sort((a, b) => a.index - b.index)
-        .map((field) => paramValues[field.key] ?? ""),
+        .sort((a, b) => a.order - b.order)
+        .map((field) => buildTextParameter(field.token, paramValues[field.key] ?? "")),
     }));
 
     onSelect(selected, {
       bodyParams,
-      headerParams: headerParams.length > 0 ? headerParams : undefined,
+      bodyParameterObjects:
+        bodyParameterObjects.length > 0 ? bodyParameterObjects : undefined,
+      headerParameterObjects:
+        headerParameterObjects.length > 0 ? headerParameterObjects : undefined,
       buttonParams: buttonParams.length > 0 ? buttonParams : undefined,
     });
     handleOpenChange(false);
@@ -289,7 +322,7 @@ export function TemplatePicker({
                   selected.body_text,
                   fields
                     .filter((field) => field.target === "body")
-                    .sort((a, b) => a.index - b.index)
+                    .sort((a, b) => a.order - b.order)
                     .map((field) => paramValues[field.key] ?? ""),
                 )}
               </p>

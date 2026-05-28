@@ -1,6 +1,7 @@
 'use client';
 
 import { useState, useEffect, useCallback } from 'react';
+import { useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { toast } from 'sonner';
 import type { Contact, Tag, ContactTag } from '@/types';
@@ -38,6 +39,7 @@ import {
   Trash2,
   Loader2,
   Users,
+  MessageSquare,
   ChevronLeft,
   ChevronRight,
 } from 'lucide-react';
@@ -52,6 +54,7 @@ interface ContactWithTags extends Contact {
 }
 
 export default function ContactsPage() {
+  const router = useRouter();
   const supabase = createClient();
 
   const [contacts, setContacts] = useState<ContactWithTags[]>([]);
@@ -70,6 +73,7 @@ export default function ContactsPage() {
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<Contact | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [selectedContactIds, setSelectedContactIds] = useState<string[]>([]);
 
   // All tags for display
   const [tagsMap, setTagsMap] = useState<Record<string, Tag>>({});
@@ -201,9 +205,39 @@ export default function ContactsPage() {
     setDeleteTarget(null);
   }
 
+  function toggleSelectedContact(contactId: string) {
+    setSelectedContactIds((current) =>
+      current.includes(contactId)
+        ? current.filter((id) => id !== contactId)
+        : [...current, contactId]
+    );
+  }
+
+  function toggleSelectPage(checked: boolean) {
+    if (checked) {
+      setSelectedContactIds((current) => [
+        ...new Set([...current, ...contacts.map((contact) => contact.id)]),
+      ]);
+      return;
+    }
+    setSelectedContactIds((current) =>
+      current.filter((id) => !contacts.some((contact) => contact.id === id))
+    );
+  }
+
+  function handleBulkMessage() {
+    if (selectedContactIds.length === 0) {
+      toast.error('Select at least one contact');
+      return;
+    }
+    router.push(`/broadcasts/new?contactIds=${selectedContactIds.join(',')}`);
+  }
+
   const totalPages = Math.ceil(totalCount / PAGE_SIZE);
   const hasNext = page < totalPages - 1;
   const hasPrev = page > 0;
+  const allVisibleSelected =
+    contacts.length > 0 && contacts.every((contact) => selectedContactIds.includes(contact.id));
 
   return (
     <div className="space-y-6">
@@ -216,6 +250,16 @@ export default function ContactsPage() {
           </p>
         </div>
         <div className="flex items-center gap-2">
+          {selectedContactIds.length > 0 && (
+            <Button
+              variant="outline"
+              onClick={handleBulkMessage}
+              className="border-primary/40 text-primary hover:bg-primary/10"
+            >
+              <MessageSquare className="size-4" />
+              Bulk Message ({selectedContactIds.length})
+            </Button>
+          )}
           <Button
             variant="outline"
             onClick={() => setImportOpen(true)}
@@ -255,6 +299,15 @@ export default function ContactsPage() {
         <Table>
           <TableHeader>
             <TableRow className="border-slate-800 hover:bg-transparent">
+              <TableHead className="w-12 text-slate-400">
+                <input
+                  type="checkbox"
+                  checked={allVisibleSelected}
+                  onChange={(e) => toggleSelectPage(e.target.checked)}
+                  aria-label="Select all visible contacts"
+                  className="size-4 rounded border-slate-600 bg-slate-900 accent-primary"
+                />
+              </TableHead>
               <TableHead className="text-slate-400">Name</TableHead>
               <TableHead className="text-slate-400">Phone</TableHead>
               <TableHead className="text-slate-400 hidden md:table-cell">Email</TableHead>
@@ -266,8 +319,8 @@ export default function ContactsPage() {
           </TableHeader>
           <TableBody>
             {loading ? (
-              <TableRow className="border-slate-800">
-                <TableCell colSpan={7} className="text-center py-12">
+                <TableRow className="border-slate-800">
+                  <TableCell colSpan={8} className="text-center py-12">
                   <div className="flex flex-col items-center gap-2">
                     <Loader2 className="size-6 animate-spin text-primary" />
                     <p className="text-sm text-slate-500">Loading contacts...</p>
@@ -275,8 +328,8 @@ export default function ContactsPage() {
                 </TableCell>
               </TableRow>
             ) : contacts.length === 0 ? (
-              <TableRow className="border-slate-800">
-                <TableCell colSpan={7} className="text-center py-12">
+                <TableRow className="border-slate-800">
+                  <TableCell colSpan={8} className="text-center py-12">
                   <div className="flex flex-col items-center gap-2">
                     <Users className="size-8 text-slate-600" />
                     <p className="text-sm text-slate-500">
@@ -303,6 +356,15 @@ export default function ContactsPage() {
                   className="border-slate-800 hover:bg-slate-900/50 cursor-pointer"
                   onClick={() => openDetail(contact.id)}
                 >
+                  <TableCell onClick={(e) => e.stopPropagation()}>
+                    <input
+                      type="checkbox"
+                      checked={selectedContactIds.includes(contact.id)}
+                      onChange={() => toggleSelectedContact(contact.id)}
+                      aria-label={`Select ${contact.name || contact.phone}`}
+                      className="size-4 rounded border-slate-600 bg-slate-900 accent-primary"
+                    />
+                  </TableCell>
                   <TableCell className="text-white font-medium">
                     {contact.name || <span className="text-slate-500 italic">Unnamed</span>}
                   </TableCell>

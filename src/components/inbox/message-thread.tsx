@@ -46,9 +46,21 @@ interface ReplyDraft {
 }
 
 function renderTemplateBody(body: string, params: string[]): string {
-  return body.replace(/\{\{(\d+)\}\}/g, (_, raw) => {
-    const idx = Number(raw) - 1;
-    return params[idx] ?? `{{${raw}}}`;
+  const variables: string[] = [];
+  for (const m of body.matchAll(/\{\{\s*([^}]+?)\s*\}\}/g)) {
+    const token = String(m[1]).trim();
+    if (token && !variables.includes(token)) {
+      variables.push(token);
+    }
+  }
+  if (variables.every((token) => /^\d+$/.test(token))) {
+    variables.sort((a, b) => Number(a) - Number(b));
+  }
+  const indexByToken = new Map(variables.map((token, idx) => [token, idx]));
+  return body.replace(/\{\{\s*([^}]+?)\s*\}\}/g, (_, raw) => {
+    const token = String(raw).trim();
+    const idx = indexByToken.get(token);
+    return idx === undefined ? `{{${token}}}` : (params[idx] ?? `{{${token}}}`);
   });
 }
 
@@ -497,8 +509,13 @@ export function MessageThread({
       template: MessageTemplate,
       templatePayload: {
         bodyParams: string[];
-        headerParams?: string[];
-        buttonParams?: { index: number; type: string; params: string[] }[];
+        bodyParameterObjects?: Array<{ type: "text"; text: string; parameter_name?: string }>;
+        headerParameterObjects?: Array<{ type: "text"; text: string; parameter_name?: string }>;
+        buttonParams?: {
+          index: number;
+          type: string;
+          params: Array<{ type: "text"; text: string; parameter_name?: string }>;
+        }[];
       },
     ) => {
       if (!conversation) return;
@@ -539,15 +556,12 @@ export function MessageThread({
             template_params: templatePayload.bodyParams,
             template_components: [
               ...(template.header_type === "text" &&
-              templatePayload.headerParams &&
-              templatePayload.headerParams.length > 0
+              templatePayload.headerParameterObjects &&
+              templatePayload.headerParameterObjects.length > 0
                 ? [
                     {
                       type: "header",
-                      parameters: templatePayload.headerParams.map((value) => ({
-                        type: "text",
-                        text: String(value),
-                      })),
+                      parameters: templatePayload.headerParameterObjects,
                     },
                   ]
                 : []),
@@ -591,13 +605,11 @@ export function MessageThread({
                   ]
                 : []),
               ...(templatePayload.bodyParams.length > 0
+              && templatePayload.bodyParameterObjects
                 ? [
                     {
                       type: "body",
-                      parameters: templatePayload.bodyParams.map((value) => ({
-                        type: "text",
-                        text: String(value),
-                      })),
+                      parameters: templatePayload.bodyParameterObjects,
                     },
                   ]
                 : []),

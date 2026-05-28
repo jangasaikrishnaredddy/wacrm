@@ -182,24 +182,11 @@ export async function POST() {
       const header = (t.components ?? []).find((c) => c.type === 'HEADER')
       const footer = (t.components ?? []).find((c) => c.type === 'FOOTER')
       const buttons = (t.components ?? []).find((c) => c.type === 'BUTTONS')
-
-      const row = {
-        user_id: user.id,
-        name: t.name,
-        category: normalizeCategory(t.category),
-        language: t.language,
-        header_type: header?.format?.toLowerCase() ?? null,
-        header_content: header?.text ?? null,
-        body_text: body?.text ?? '',
-        footer_text: footer?.text ?? null,
-        buttons: buttons?.buttons ?? null,
-        status: normalizeStatus(t.status),
-        updated_at: new Date().toISOString(),
-      }
+      const normalizedHeaderType = header?.format?.toLowerCase() ?? null
 
       const { data: existing, error: lookupErr } = await supabase
         .from('message_templates')
-        .select('id')
+        .select('id, header_content')
         .eq('user_id', user.id)
         .eq('name', t.name)
         .eq('language', t.language)
@@ -212,6 +199,26 @@ export async function POST() {
           message: lookupErr.message,
         })
         continue
+      }
+
+      const row = {
+        user_id: user.id,
+        name: t.name,
+        category: normalizeCategory(t.category),
+        language: t.language,
+        header_type: normalizedHeaderType,
+        // Meta returns header text for TEXT headers, but not the actual media
+        // URL for IMAGE/VIDEO/DOCUMENT headers. Preserve any locally stored
+        // URL on sync so template sends keep working after a refresh.
+        header_content:
+          normalizedHeaderType && normalizedHeaderType !== 'text'
+            ? existing?.header_content ?? null
+            : header?.text ?? null,
+        body_text: body?.text ?? '',
+        footer_text: footer?.text ?? null,
+        buttons: buttons?.buttons ?? null,
+        status: normalizeStatus(t.status),
+        updated_at: new Date().toISOString(),
       }
 
       if (existing?.id) {
