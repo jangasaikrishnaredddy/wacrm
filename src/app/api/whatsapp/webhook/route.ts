@@ -159,6 +159,7 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   // Read raw body first so we can HMAC-verify the exact bytes Meta
   // signed. request.json() would re-encode and break the signature.
+  console.log('[webhook] POST received at', new Date().toISOString())
   const rawBody = await request.text()
   const signature = request.headers.get('x-hub-signature-256')
 
@@ -173,14 +174,19 @@ export async function POST(request: Request) {
   let body: { entry?: WhatsAppWebhookEntry[] }
   try {
     body = JSON.parse(rawBody)
-    console.log(body)
+    console.log('[webhook] parsed payload:', JSON.stringify(body, null, 2))
   } catch {
+    console.error('[webhook] invalid JSON payload')
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 })
   }
 
   // Process asynchronously so we can ack Meta within their timeout.
   processWebhook(body).catch((error) => {
-    console.error('Error processing webhook:', error)
+    console.error(
+      '[webhook] Error processing webhook:',
+      error instanceof Error ? error.message : error,
+      error
+    )
   })
 
   return NextResponse.json({ status: 'received' }, { status: 200 })
