@@ -423,13 +423,14 @@ export function TemplateManager() {
               <Label className="text-slate-300">Header Type</Label>
               <Select
                 value={form.header_type}
-                onValueChange={(val) =>
+                onValueChange={(val) => {
+                  const nextValue = val ?? '';
                   setForm({
                     ...form,
-                    header_type: val === 'none' ? '' : val,
-                    header_content: val === 'none' ? '' : form.header_content,
-                  })
-                }
+                    header_type: nextValue === 'none' ? '' : nextValue,
+                    header_content: nextValue === 'none' ? '' : form.header_content,
+                  });
+                }}
               >
                 <SelectTrigger className="w-full bg-slate-800 border-slate-700 text-white">
                   <SelectValue placeholder="None" />
