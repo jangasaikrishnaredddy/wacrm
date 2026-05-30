@@ -63,6 +63,7 @@ const SEND_BATCH_DELAY_MS = 1000;
 
 /** `broadcast_recipients` inserts are independent of the send rate. */
 const INSERT_BATCH_SIZE = 200;
+const CONTACT_FETCH_PAGE_SIZE = 500;
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -149,9 +150,8 @@ async function fetchCustomValueIndex(
 
   // Supabase PostgREST caps the .in(...) IN-clause roughly at 1000
   // values. Page through to stay safe.
-  const PAGE = 500;
-  for (let i = 0; i < contactIds.length; i += PAGE) {
-    const slice = contactIds.slice(i, i + PAGE);
+  for (let i = 0; i < contactIds.length; i += CONTACT_FETCH_PAGE_SIZE) {
+    const slice = contactIds.slice(i, i + CONTACT_FETCH_PAGE_SIZE);
     const { data } = await supabase
       .from('contact_custom_values')
       .select('contact_id, custom_field_id, value')
@@ -164,6 +164,24 @@ async function fetchCustomValueIndex(
     }
   }
   return index;
+}
+
+async function fetchContactsByIds(
+  supabase: ReturnType<typeof createClient>,
+  contactIds: string[],
+): Promise<Contact[]> {
+  const uniqueContactIds = [...new Set(contactIds.filter(Boolean))];
+  if (uniqueContactIds.length === 0) return [];
+
+  const contacts: Contact[] = [];
+  for (let i = 0; i < uniqueContactIds.length; i += CONTACT_FETCH_PAGE_SIZE) {
+    const slice = uniqueContactIds.slice(i, i + CONTACT_FETCH_PAGE_SIZE);
+    const { data, error } = await supabase.from('contacts').select('*').in('id', slice);
+    if (error) throw new Error(`Failed to fetch contacts: ${error.message}`);
+    contacts.push(...(data ?? []));
+  }
+
+  return contacts;
 }
 
 export function useBroadcastSending(): UseBroadcastSendingReturn {
@@ -193,15 +211,10 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
         throw new Error(`Failed to fetch contact tags: ${tagError.message}`);
 
       if (contactTags && contactTags.length > 0) {
-        const uniqueContactIds = [
-          ...new Set(contactTags.map((ct) => ct.contact_id)),
-        ];
-        const { data, error } = await supabase
-          .from('contacts')
-          .select('*')
-          .in('id', uniqueContactIds);
-        if (error) throw new Error(`Failed to fetch contacts: ${error.message}`);
-        contacts = data ?? [];
+        contacts = await fetchContactsByIds(
+          supabase,
+          contactTags.map((ct) => ct.contact_id),
+        );
       }
     } else if (audience.type === 'custom_field' && audience.customField) {
       contacts = await resolveCustomFieldAudience(supabase, audience.customField);
@@ -212,12 +225,14 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
       audience.contactIds &&
       audience.contactIds.length > 0
     ) {
-      const { data, error } = await supabase
-        .from('contacts')
-        .select('*')
-        .in('id', audience.contactIds);
-      if (error) throw new Error(`Failed to fetch selected contacts: ${error.message}`);
-      contacts = data ?? [];
+      try {
+        contacts = await fetchContactsByIds(supabase, audience.contactIds);
+      } catch (error) {
+        if (error instanceof Error) {
+          throw new Error(`Failed to fetch selected contacts: ${error.message}`);
+        }
+        throw error;
+      }
     }
 
     // Apply exclude tags (works across all contact-derived audience
@@ -337,12 +352,7 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
     const contactIds = [...new Set((matches ?? []).map((m) => m.contact_id))];
     if (contactIds.length === 0) return [];
 
-    const { data, error } = await supabase
-      .from('contacts')
-      .select('*')
-      .in('id', contactIds);
-    if (error) throw new Error(`Failed to fetch contacts: ${error.message}`);
-    return data ?? [];
+    return fetchContactsByIds(supabase, contactIds);
   }
 
   async function createAndSendBroadcast(payload: BroadcastPayload): Promise<string> {
