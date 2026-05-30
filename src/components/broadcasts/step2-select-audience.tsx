@@ -84,6 +84,75 @@ const OPERATOR_OPTIONS: { value: CustomFieldOperator; label: string }[] = [
   { value: 'contains', label: 'contains' },
 ];
 
+const PAGE_SIZE = 500;
+
+async function fetchAllContactIdsForTagFilter(
+  tagIds: string[],
+): Promise<Set<string>> {
+  const supabase = createClient();
+  const contactIds = new Set<string>();
+
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const to = from + PAGE_SIZE - 1;
+    const { data, error } = await supabase
+      .from('contact_tags')
+      .select('contact_id')
+      .in('tag_id', tagIds)
+      .range(from, to);
+
+    if (error) {
+      throw new Error(`Failed to fetch tag audience: ${error.message}`);
+    }
+
+    const batch = data ?? [];
+    for (const row of batch) {
+      contactIds.add(row.contact_id);
+    }
+
+    if (batch.length < PAGE_SIZE) {
+      break;
+    }
+  }
+
+  return contactIds;
+}
+
+async function fetchAllContactIdsForCustomFieldFilter(
+  filter: CustomFieldFilter,
+): Promise<Set<string>> {
+  const supabase = createClient();
+  const contactIds = new Set<string>();
+
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const to = from + PAGE_SIZE - 1;
+    const { fieldId, operator, value } = filter;
+    let query = supabase
+      .from('contact_custom_values')
+      .select('contact_id')
+      .eq('custom_field_id', fieldId)
+      .range(from, to);
+    if (operator === 'is') query = query.eq('value', value);
+    else if (operator === 'is_not') query = query.neq('value', value);
+    else query = query.ilike('value', `%${value}%`);
+
+    const { data, error } = await query;
+    if (error) {
+      throw new Error(`Failed to fetch custom-field audience: ${error.message}`);
+    }
+
+    const batch = data ?? [];
+    for (const row of batch) {
+      contactIds.add(row.contact_id);
+    }
+
+    if (batch.length < PAGE_SIZE) {
+      break;
+    }
+  }
+
+  return contactIds;
+}
+
 export function Step2SelectAudience({
   audience,
   onUpdate,
@@ -158,8 +227,6 @@ export function Step2SelectAudience({
   const fetchEstimatedCount = useCallback(async () => {
     setLoadingCount(true);
     try {
-      const supabase = createClient();
-
       // Base query — produces the superset before exclude is applied.
       let baseIds: Set<string> | null = null; // null means "all contacts"
 
@@ -170,26 +237,15 @@ export function Step2SelectAudience({
         audience.tagIds &&
         audience.tagIds.length > 0
       ) {
-        const { data } = await supabase
-          .from('contact_tags')
-          .select('contact_id')
-          .in('tag_id', audience.tagIds);
-        baseIds = new Set((data ?? []).map((r) => r.contact_id));
+        baseIds = await fetchAllContactIdsForTagFilter(audience.tagIds);
       } else if (
         audience.type === 'custom_field' &&
         audience.customField?.fieldId &&
         audience.customField.value
       ) {
-        const { fieldId, operator, value } = audience.customField;
-        let q = supabase
-          .from('contact_custom_values')
-          .select('contact_id')
-          .eq('custom_field_id', fieldId);
-        if (operator === 'is') q = q.eq('value', value);
-        else if (operator === 'is_not') q = q.neq('value', value);
-        else q = q.ilike('value', `%${value}%`);
-        const { data } = await q;
-        baseIds = new Set((data ?? []).map((r) => r.contact_id));
+        baseIds = await fetchAllContactIdsForCustomFieldFilter(
+          audience.customField,
+        );
       } else if (
         audience.type === 'csv' &&
         audience.csvContacts &&
@@ -213,11 +269,7 @@ export function Step2SelectAudience({
       // Apply exclude tags
       let excludeSet: Set<string> | null = null;
       if (audience.excludeTagIds && audience.excludeTagIds.length > 0) {
-        const { data: excludeRows } = await supabase
-          .from('contact_tags')
-          .select('contact_id')
-          .in('tag_id', audience.excludeTagIds);
-        excludeSet = new Set((excludeRows ?? []).map((r) => r.contact_id));
+        excludeSet = await fetchAllContactIdsForTagFilter(audience.excludeTagIds);
       }
 
       if (baseIds) {
@@ -227,6 +279,7 @@ export function Step2SelectAudience({
         setEstimatedCount(effective.length);
       } else {
         // "All" — fetch the total, then subtract exclude set if any.
+        const supabase = createClient();
         const { count } = await supabase
           .from('contacts')
           .select('*', { count: 'exact', head: true });

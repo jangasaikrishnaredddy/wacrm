@@ -143,7 +143,7 @@ export function resolveTemplateParameters(
  * Bulk-fetch contact_custom_values for a set of contacts. Returns an
  * index keyed by contact_id → field_id → value.
  */
-async function fetchCustomValueIndex(
+export async function fetchCustomValueIndex(
   supabase: ReturnType<typeof createClient>,
   contactIds: string[],
 ): Promise<CustomValueIndex> {
@@ -184,6 +184,37 @@ async function fetchContactsByIds(
   }
 
   return contacts;
+}
+
+async function fetchContactIdsByTagIds(
+  supabase: ReturnType<typeof createClient>,
+  tagIds: string[],
+): Promise<string[]> {
+  const contactIds = new Set<string>();
+
+  for (let from = 0; ; from += CONTACT_FETCH_PAGE_SIZE) {
+    const to = from + CONTACT_FETCH_PAGE_SIZE - 1;
+    const { data, error } = await supabase
+      .from('contact_tags')
+      .select('contact_id')
+      .in('tag_id', tagIds)
+      .range(from, to);
+
+    if (error) {
+      throw new Error(`Failed to fetch contact tags: ${error.message}`);
+    }
+
+    const batch = data ?? [];
+    for (const row of batch) {
+      contactIds.add(row.contact_id);
+    }
+
+    if (batch.length < CONTACT_FETCH_PAGE_SIZE) {
+      break;
+    }
+  }
+
+  return [...contactIds];
 }
 
 async function fetchBroadcastRecipients(
@@ -255,19 +286,10 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
       audience.tagIds &&
       audience.tagIds.length > 0
     ) {
-      const { data: contactTags, error: tagError } = await supabase
-        .from('contact_tags')
-        .select('contact_id')
-        .in('tag_id', audience.tagIds);
+      const contactIds = await fetchContactIdsByTagIds(supabase, audience.tagIds);
 
-      if (tagError)
-        throw new Error(`Failed to fetch contact tags: ${tagError.message}`);
-
-      if (contactTags && contactTags.length > 0) {
-        contacts = await fetchContactsByIds(
-          supabase,
-          contactTags.map((ct) => ct.contact_id),
-        );
+      if (contactIds.length > 0) {
+        contacts = await fetchContactsByIds(supabase, contactIds);
       }
     } else if (audience.type === 'custom_field' && audience.customField) {
       contacts = await resolveCustomFieldAudience(supabase, audience.customField);
@@ -291,11 +313,9 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
     // Apply exclude tags (works across all contact-derived audience
     // types). CSV contacts are synthetic so exclusion doesn't apply.
     if (audience.excludeTagIds && audience.excludeTagIds.length > 0) {
-      const { data: excludeRows } = await supabase
-        .from('contact_tags')
-        .select('contact_id')
-        .in('tag_id', audience.excludeTagIds);
-      const excludedIds = new Set((excludeRows ?? []).map((r) => r.contact_id));
+      const excludedIds = new Set(
+        await fetchContactIdsByTagIds(supabase, audience.excludeTagIds),
+      );
       contacts = contacts.filter((c) => !excludedIds.has(c.id));
     }
 

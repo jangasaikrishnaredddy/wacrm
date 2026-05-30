@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { createClient } from '@/lib/supabase/client';
 import { Broadcast, BroadcastRecipient, RecipientStatus } from '@/types';
@@ -38,8 +38,26 @@ import {
   getBroadcastStatus,
   getRecipientStatus,
 } from '@/lib/broadcast-status';
+import {
+  fetchCustomValueIndex,
+  resolveTemplateParameters,
+  resolveVariables,
+  VariableMapping,
+} from '@/hooks/use-broadcast-sending';
 
 const RECIPIENT_PAGE_SIZE = 500;
+
+function isRateLimitMessage(message?: string | null) {
+  const normalized = (message ?? '').toLowerCase();
+  return (
+    normalized.includes('rate limit') ||
+    normalized.includes('too many requests') ||
+    normalized.includes('429') ||
+    normalized.includes('131056') ||
+    normalized.includes('130429') ||
+    normalized.includes('80007')
+  );
+}
 
 interface StatCardProps {
   label: string;
@@ -158,46 +176,48 @@ export default function BroadcastDetailPage() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [stopping, setStopping] = useState(false);
+  const [retryingRateLimited, setRetryingRateLimited] = useState(false);
+
+  const loadData = useCallback(async () => {
+    try {
+      const supabase = createClient();
+
+      const { data: bc, error: bcError } = await supabase
+        .from('broadcasts')
+        .select('*')
+        .eq('id', broadcastId)
+        .single();
+
+      if (bcError) throw bcError;
+      setBroadcast(bc);
+
+      const allRecipients: BroadcastRecipient[] = [];
+      for (let from = 0; ; from += RECIPIENT_PAGE_SIZE) {
+        const to = from + RECIPIENT_PAGE_SIZE - 1;
+        const { data: recs, error: recsError } = await supabase
+          .from('broadcast_recipients')
+          .select('*, contact:contacts(*)')
+          .eq('broadcast_id', broadcastId)
+          .order('created_at', { ascending: false })
+          .range(from, to);
+
+        if (recsError) throw recsError;
+        const batch = recs ?? [];
+        allRecipients.push(...batch);
+        if (batch.length < RECIPIENT_PAGE_SIZE) break;
+      }
+      setRecipients(allRecipients);
+      setError(null);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Failed to load broadcast');
+    } finally {
+      setLoading(false);
+    }
+  }, [broadcastId]);
 
   useEffect(() => {
-    async function fetchData() {
-      try {
-        const supabase = createClient();
-
-        const { data: bc, error: bcError } = await supabase
-          .from('broadcasts')
-          .select('*')
-          .eq('id', broadcastId)
-          .single();
-
-        if (bcError) throw bcError;
-        setBroadcast(bc);
-
-        const allRecipients: BroadcastRecipient[] = [];
-        for (let from = 0; ; from += RECIPIENT_PAGE_SIZE) {
-          const to = from + RECIPIENT_PAGE_SIZE - 1;
-          const { data: recs, error: recsError } = await supabase
-            .from('broadcast_recipients')
-            .select('*, contact:contacts(*)')
-            .eq('broadcast_id', broadcastId)
-            .order('created_at', { ascending: false })
-            .range(from, to);
-
-          if (recsError) throw recsError;
-          const batch = recs ?? [];
-          allRecipients.push(...batch);
-          if (batch.length < RECIPIENT_PAGE_SIZE) break;
-        }
-        setRecipients(allRecipients);
-      } catch (err) {
-        setError(err instanceof Error ? err.message : 'Failed to load broadcast');
-      } finally {
-        setLoading(false);
-      }
-    }
-
-    fetchData();
-  }, [broadcastId]);
+    loadData();
+  }, [loadData]);
 
   const filteredRecipients = useMemo(
     () =>
@@ -205,6 +225,14 @@ export default function BroadcastDetailPage() {
         ? recipients
         : recipients.filter((r) => r.status === statusFilter),
     [recipients, statusFilter],
+  );
+  const rateLimitedRecipients = useMemo(
+    () =>
+      recipients.filter(
+        (recipient) =>
+          recipient.status === 'failed' && isRateLimitMessage(recipient.error_message),
+      ),
+    [recipients],
   );
 
   function handleExport() {
@@ -277,6 +305,130 @@ export default function BroadcastDetailPage() {
 
     setBroadcast((current) => (current ? { ...current, status: 'stopped' } : current));
     toast.success('Broadcast stopped');
+  }
+
+  async function handleRetryRateLimited() {
+    if (!broadcast) return;
+
+    const retryCandidates = recipients.filter(
+      (recipient) =>
+        recipient.status === 'failed' &&
+        Boolean(recipient.contact?.phone) &&
+        isRateLimitMessage(recipient.error_message),
+    );
+
+    if (retryCandidates.length === 0) {
+      toast.error('No rate-limited recipients to retry.');
+      return;
+    }
+
+    setRetryingRateLimited(true);
+    try {
+      const supabase = createClient();
+      const variables = (broadcast.template_variables ?? {}) as Record<
+        string,
+        VariableMapping
+      >;
+
+      await supabase
+        .from('broadcasts')
+        .update({ status: 'sending' })
+        .eq('id', broadcastId);
+
+      const contactIds = retryCandidates
+        .map((recipient) => recipient.contact?.id)
+        .filter((id): id is string => Boolean(id));
+      const customValueIndex = await fetchCustomValueIndex(supabase, contactIds);
+
+      const retryPayload = retryCandidates.map((recipient) => ({
+        recipientId: recipient.id,
+        phone: recipient.contact!.phone,
+        params: resolveVariables(
+          variables,
+          recipient.contact!,
+          customValueIndex.get(recipient.contact!.id),
+        ),
+        body_parameter_objects: resolveTemplateParameters(
+          variables,
+          recipient.contact!,
+          customValueIndex.get(recipient.contact!.id),
+        ),
+      }));
+
+      const response = await fetch('/api/whatsapp/broadcast', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          recipients: retryPayload.map((recipient) => ({
+            phone: recipient.phone,
+            params: recipient.params,
+            body_parameter_objects: recipient.body_parameter_objects,
+          })),
+          template_name: broadcast.template_name,
+          template_language: broadcast.template_language,
+        }),
+      });
+
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload.error || 'Retry request failed');
+      }
+
+      const resultsByPhone = new Map<
+        string,
+        {
+          status: 'sent' | 'failed';
+          whatsapp_message_id?: string;
+          error?: string;
+        }
+      >();
+      for (const row of payload.results ?? []) {
+        resultsByPhone.set(row.phone, row);
+      }
+
+      for (const recipient of retryPayload) {
+        const result = resultsByPhone.get(recipient.phone);
+        if (!result) continue;
+
+        if (result.status === 'sent') {
+          await supabase
+            .from('broadcast_recipients')
+            .update({
+              status: 'sent',
+              sent_at: new Date().toISOString(),
+              whatsapp_message_id: result.whatsapp_message_id ?? null,
+              error_message: null,
+            })
+            .eq('id', recipient.recipientId);
+        } else {
+          await supabase
+            .from('broadcast_recipients')
+            .update({
+              status: 'failed',
+              error_message: result.error ?? 'Unknown error',
+            })
+            .eq('id', recipient.recipientId);
+        }
+      }
+
+      const { count: remainingFailedCount } = await supabase
+        .from('broadcast_recipients')
+        .select('*', { count: 'exact', head: true })
+        .eq('broadcast_id', broadcastId)
+        .eq('status', 'failed');
+
+      await supabase
+        .from('broadcasts')
+        .update({ status: (remainingFailedCount ?? 0) > 0 ? 'failed' : 'sent' })
+        .eq('id', broadcastId);
+
+      await loadData();
+      toast.success(`Retried ${retryCandidates.length} rate-limited recipients.`);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : 'Failed to retry recipients');
+    } finally {
+      setRetryingRateLimited(false);
+    }
   }
 
   if (loading) {
@@ -443,6 +595,17 @@ export default function BroadcastDetailPage() {
             {statusFilter !== 'all' ? ` of ${recipients.length}` : ''})
           </h2>
           <div className="flex items-center gap-2">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={handleRetryRateLimited}
+              disabled={rateLimitedRecipients.length === 0 || retryingRateLimited}
+              className="border-slate-700 text-slate-300 hover:bg-slate-800 disabled:opacity-40"
+            >
+              {retryingRateLimited
+                ? 'Retrying...'
+                : `Retry Rate Limit${rateLimitedRecipients.length > 0 ? ` (${rateLimitedRecipients.length})` : ''}`}
+            </Button>
             <DropdownMenu>
               <DropdownMenuTrigger
                 render={
