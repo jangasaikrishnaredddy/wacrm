@@ -21,6 +21,25 @@ interface BroadcastResult {
   error?: string
 }
 
+const META_RATE_LIMIT_RETRY_DELAYS_MS = [3000, 6000, 10000]
+
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
+function isMetaRateLimitError(message: string) {
+  const normalized = message.toLowerCase()
+  return (
+    normalized.includes('rate limit') ||
+    normalized.includes('too many requests') ||
+    normalized.includes('error: 429') ||
+    normalized.includes('code 429') ||
+    normalized.includes('131056') ||
+    normalized.includes('130429') ||
+    normalized.includes('80007')
+  )
+}
+
 /**
  * Two input shapes are accepted:
  *
@@ -168,79 +187,95 @@ export async function POST(request: Request) {
       let lastError: string | null = null
 
       for (const variant of variants) {
-        try {
-          const mediaHeaderComponent =
-            templateRow?.header_type === 'image' && templateRow.header_content
+        const mediaHeaderComponent =
+          templateRow?.header_type === 'image' && templateRow.header_content
+            ? [
+                {
+                  type: 'header',
+                  parameters: [
+                    {
+                      type: 'image',
+                      image: { link: templateRow.header_content },
+                    },
+                  ],
+                },
+              ]
+            : templateRow?.header_type === 'video' && templateRow.header_content
               ? [
                   {
                     type: 'header',
                     parameters: [
                       {
-                        type: 'image',
-                        image: { link: templateRow.header_content },
+                        type: 'video',
+                        video: { link: templateRow.header_content },
                       },
                     ],
                   },
                 ]
-              : templateRow?.header_type === 'video' && templateRow.header_content
+              : templateRow?.header_type === 'document' && templateRow.header_content
                 ? [
                     {
                       type: 'header',
                       parameters: [
                         {
-                          type: 'video',
-                          video: { link: templateRow.header_content },
+                          type: 'document',
+                          document: { link: templateRow.header_content },
                         },
                       ],
                     },
                   ]
-                : templateRow?.header_type === 'document' && templateRow.header_content
+                : []
+
+        for (let attempt = 0; attempt <= META_RATE_LIMIT_RETRY_DELAYS_MS.length; attempt++) {
+          try {
+            const result = await sendTemplateMessage({
+              phoneNumberId: config.phone_number_id,
+              accessToken,
+              to: variant,
+              templateName: template_name,
+              language: template_language || 'en_US',
+              params: recipient.params ?? [],
+              components:
+                recipient.body_parameter_objects &&
+                recipient.body_parameter_objects.length > 0
                   ? [
+                      ...mediaHeaderComponent,
                       {
-                        type: 'header',
-                        parameters: [
-                          {
-                            type: 'document',
-                            document: { link: templateRow.header_content },
-                          },
-                        ],
+                        type: 'body',
+                        parameters: recipient.body_parameter_objects,
                       },
                     ]
-                  : []
-
-          const result = await sendTemplateMessage({
-            phoneNumberId: config.phone_number_id,
-            accessToken,
-            to: variant,
-            templateName: template_name,
-            language: template_language || 'en_US',
-            params: recipient.params ?? [],
-            components:
-              recipient.body_parameter_objects &&
-              recipient.body_parameter_objects.length > 0
-                ? [
-                    ...mediaHeaderComponent,
-                    {
-                      type: 'body',
-                      parameters: recipient.body_parameter_objects,
-                    },
-                  ]
-                : mediaHeaderComponent.length > 0
-                  ? mediaHeaderComponent
-                  : undefined,
-          })
-          sentMessageId = result.messageId
-          lastError = null
-          break
-        } catch (error) {
-          const errorMessage =
-            error instanceof Error ? error.message : 'Unknown error'
-          if (!isRecipientNotAllowedError(errorMessage)) {
-            lastError = errorMessage
+                  : mediaHeaderComponent.length > 0
+                    ? mediaHeaderComponent
+                    : undefined,
+            })
+            sentMessageId = result.messageId
+            lastError = null
             break
+          } catch (error) {
+            const errorMessage =
+              error instanceof Error ? error.message : 'Unknown error'
+            lastError = errorMessage
+
+            if (isRecipientNotAllowedError(errorMessage)) {
+              break
+            }
+
+            const retryDelay = META_RATE_LIMIT_RETRY_DELAYS_MS[attempt]
+            if (!isMetaRateLimitError(errorMessage) || retryDelay === undefined) {
+              break
+            }
+
+            console.warn(
+              `[broadcast] Meta rate limit for ${recipient.phone}; retrying in ${retryDelay}ms`,
+              errorMessage
+            )
+            await sleep(retryDelay)
           }
-          lastError = errorMessage
-          // retry with next variant
+        }
+
+        if (sentMessageId || !isRecipientNotAllowedError(lastError || '')) {
+          break
         }
       }
 

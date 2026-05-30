@@ -54,16 +54,18 @@ interface UseBroadcastSendingReturn {
 }
 
 /**
- * Meta rate-limit buffer. 10 per batch + 1 s pause matches the spec
- * and keeps us comfortably under Meta's per-phone-number messaging
- * rate so a large broadcast never trips the upstream limiter.
+ * Meta rate-limit buffer. Keep a deliberately conservative pace so
+ * large broadcasts stay stable across accounts with lower throughput
+ * tiers and we leave room for webhook / inbox traffic on the same
+ * sending number.
  */
-const SEND_BATCH_SIZE = 10;
-const SEND_BATCH_DELAY_MS = 1000;
+const SEND_BATCH_SIZE = 5;
+const SEND_BATCH_DELAY_MS = 2000;
 
 /** `broadcast_recipients` inserts are independent of the send rate. */
 const INSERT_BATCH_SIZE = 200;
 const CONTACT_FETCH_PAGE_SIZE = 500;
+const BROADCAST_RECIPIENT_FETCH_PAGE_SIZE = 500;
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -182,6 +184,57 @@ async function fetchContactsByIds(
   }
 
   return contacts;
+}
+
+async function fetchBroadcastRecipients(
+  supabase: ReturnType<typeof createClient>,
+  broadcastId: string,
+) {
+  const recipients: Array<{
+    id: string;
+    contact: Contact | null;
+    status: string;
+    created_at: string;
+  }> = [];
+
+  for (let from = 0; ; from += BROADCAST_RECIPIENT_FETCH_PAGE_SIZE) {
+    const to = from + BROADCAST_RECIPIENT_FETCH_PAGE_SIZE - 1;
+    const { data, error } = await supabase
+      .from('broadcast_recipients')
+      .select('*, contact:contacts(*)')
+      .eq('broadcast_id', broadcastId)
+      .range(from, to);
+
+    if (error) {
+      throw new Error(`Failed to fetch broadcast recipients: ${error.message}`);
+    }
+
+    const batch = data ?? [];
+    recipients.push(...batch);
+
+    if (batch.length < BROADCAST_RECIPIENT_FETCH_PAGE_SIZE) {
+      break;
+    }
+  }
+
+  return recipients;
+}
+
+async function fetchBroadcastStatus(
+  supabase: ReturnType<typeof createClient>,
+  broadcastId: string,
+): Promise<string> {
+  const { data, error } = await supabase
+    .from('broadcasts')
+    .select('status')
+    .eq('id', broadcastId)
+    .single();
+
+  if (error || !data) {
+    throw new Error(`Failed to check broadcast status: ${error?.message ?? 'unknown error'}`);
+  }
+
+  return data.status;
 }
 
 export function useBroadcastSending(): UseBroadcastSendingReturn {
@@ -451,14 +504,7 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
 
       // ── Step 4: Fetch recipients (joined contact) + preload custom values
       setProgress(30);
-      const { data: recipients, error: recipientsFetchError } = await supabase
-        .from('broadcast_recipients')
-        .select('*, contact:contacts(*)')
-        .eq('broadcast_id', broadcast.id);
-
-      if (recipientsFetchError || !recipients) {
-        throw new Error('Failed to fetch broadcast recipients');
-      }
+      const recipients = await fetchBroadcastRecipients(supabase, broadcast.id);
 
       // One bulk fetch of custom values for every contact in this
       // broadcast, avoiding N+1 during the send loop.
@@ -474,6 +520,12 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
       const totalRecipients = recipients.length;
 
       for (let i = 0; i < recipients.length; i += SEND_BATCH_SIZE) {
+        const currentStatus = await fetchBroadcastStatus(supabase, broadcast.id);
+        if (currentStatus === 'stopped') {
+          setProgress(100);
+          return broadcast.id;
+        }
+
         const batch = recipients.slice(i, i + SEND_BATCH_SIZE);
 
         const apiRecipients = batch
@@ -583,6 +635,11 @@ export function useBroadcastSending(): UseBroadcastSendingReturn {
       // Aggregate counts are maintained by the DB trigger (migration
       // 003); we only flip the final status here.
       setProgress(95);
+      const currentStatus = await fetchBroadcastStatus(supabase, broadcast.id);
+      if (currentStatus === 'stopped') {
+        setProgress(100);
+        return broadcast.id;
+      }
       const finalStatus = failedCount === totalRecipients ? 'failed' : 'sent';
       await supabase
         .from('broadcasts')

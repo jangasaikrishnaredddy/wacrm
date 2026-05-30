@@ -11,6 +11,7 @@ describe("getBroadcastStatus", () => {
     expect(getBroadcastStatus("sending")).toBe(broadcastStatusConfig.sending);
     expect(getBroadcastStatus("sent")).toBe(broadcastStatusConfig.sent);
     expect(getBroadcastStatus("failed")).toBe(broadcastStatusConfig.failed);
+    expect(getBroadcastStatus("stopped")).toBe(broadcastStatusConfig.stopped);
   });
 
   it("flags `sending` as a live/pulsing state", () => {

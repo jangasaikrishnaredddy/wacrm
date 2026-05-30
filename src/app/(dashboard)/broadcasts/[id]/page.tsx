@@ -39,6 +39,8 @@ import {
   getRecipientStatus,
 } from '@/lib/broadcast-status';
 
+const RECIPIENT_PAGE_SIZE = 500;
+
 interface StatCardProps {
   label: string;
   value: number;
@@ -155,6 +157,7 @@ export default function BroadcastDetailPage() {
   );
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [stopping, setStopping] = useState(false);
 
   useEffect(() => {
     async function fetchData() {
@@ -170,14 +173,22 @@ export default function BroadcastDetailPage() {
         if (bcError) throw bcError;
         setBroadcast(bc);
 
-        const { data: recs, error: recsError } = await supabase
-          .from('broadcast_recipients')
-          .select('*, contact:contacts(*)')
-          .eq('broadcast_id', broadcastId)
-          .order('created_at', { ascending: false });
+        const allRecipients: BroadcastRecipient[] = [];
+        for (let from = 0; ; from += RECIPIENT_PAGE_SIZE) {
+          const to = from + RECIPIENT_PAGE_SIZE - 1;
+          const { data: recs, error: recsError } = await supabase
+            .from('broadcast_recipients')
+            .select('*, contact:contacts(*)')
+            .eq('broadcast_id', broadcastId)
+            .order('created_at', { ascending: false })
+            .range(from, to);
 
-        if (recsError) throw recsError;
-        setRecipients(recs ?? []);
+          if (recsError) throw recsError;
+          const batch = recs ?? [];
+          allRecipients.push(...batch);
+          if (batch.length < RECIPIENT_PAGE_SIZE) break;
+        }
+        setRecipients(allRecipients);
       } catch (err) {
         setError(err instanceof Error ? err.message : 'Failed to load broadcast');
       } finally {
@@ -241,6 +252,31 @@ export default function BroadcastDetailPage() {
     }
     toast.success('Broadcast deleted');
     router.push('/broadcasts');
+  }
+
+  async function handleStop() {
+    setStopping(true);
+    const supabase = createClient();
+    const { data: stoppedRow, error: stopErr } = await supabase
+      .from('broadcasts')
+      .update({ status: 'stopped' })
+      .eq('id', broadcastId)
+      .eq('status', 'sending')
+      .select('status')
+      .maybeSingle();
+
+    setStopping(false);
+    if (stopErr) {
+      toast.error(`Failed to stop broadcast: ${stopErr.message}`);
+      return;
+    }
+    if (!stoppedRow) {
+      toast.error('Broadcast is no longer sending.');
+      return;
+    }
+
+    setBroadcast((current) => (current ? { ...current, status: 'stopped' } : current));
+    toast.success('Broadcast stopped');
   }
 
   if (loading) {
@@ -328,6 +364,15 @@ export default function BroadcastDetailPage() {
               {deleting ? 'Deleting…' : 'Confirm'}
             </Button>
           </div>
+        ) : broadcast.status === 'sending' ? (
+          <Button
+            variant="outline"
+            onClick={handleStop}
+            disabled={stopping}
+            className="border-orange-500/30 bg-orange-500/10 text-orange-300 hover:bg-orange-500/20 hover:text-orange-200"
+          >
+            {stopping ? 'Stopping...' : 'Stop Broadcast'}
+          </Button>
         ) : (
           <Button
             variant="outline"

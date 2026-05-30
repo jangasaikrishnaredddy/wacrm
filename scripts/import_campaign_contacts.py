@@ -198,6 +198,22 @@ def get_or_create_tag(api: SupabaseRest, user_id: str, name: str, color: str) ->
     return created[0]["id"]
 
 
+def resolve_tag_by_id(api: SupabaseRest, user_id: str, tag_id: str) -> tuple[str, str]:
+    rows = api.request(
+        "GET",
+        "tags",
+        query={
+            "select": "id,name",
+            "id": f"eq.{tag_id}",
+            "user_id": f"eq.{user_id}",
+            "limit": "1",
+        },
+    )
+    if not rows:
+        raise RuntimeError(f"Tag not found for user {user_id}: {tag_id}")
+    return rows[0]["id"], rows[0]["name"]
+
+
 def fetch_existing_contacts(api: SupabaseRest, user_id: str, phones: list[str]) -> dict[str, dict[str, Any]]:
     if not phones:
         return {}
@@ -312,9 +328,18 @@ def main() -> None:
         help="Campaign tag name to add to imported contacts.",
     )
     parser.add_argument(
+        "--campaign-tag-id",
+        help="Existing campaign tag UUID to attach instead of looking it up by name.",
+    )
+    parser.add_argument(
         "--customer-tag",
         default="CUSTOMER",
         help="Customer tag name to add to imported contacts.",
+    )
+    parser.add_argument(
+        "--skip-customer-tag",
+        action="store_true",
+        help="Do not attach the default customer tag.",
     )
     args = parser.parse_args()
 
@@ -334,13 +359,24 @@ def main() -> None:
         raise RuntimeError("No contacts found in workbook.")
 
     api = SupabaseRest(supabase_url.rstrip("/"), service_role_key)
-    customer_tag_id = get_or_create_tag(api, args.user_id, args.customer_tag, "#3b82f6")
-    campaign_tag_id = get_or_create_tag(api, args.user_id, args.campaign_tag, "#10b981")
+    customer_tag_id = (
+        None
+        if args.skip_customer_tag
+        else get_or_create_tag(api, args.user_id, args.customer_tag, "#3b82f6")
+    )
+    if args.campaign_tag_id:
+        campaign_tag_id, campaign_tag_name = resolve_tag_by_id(
+            api, args.user_id, args.campaign_tag_id
+        )
+    else:
+        campaign_tag_id = get_or_create_tag(api, args.user_id, args.campaign_tag, "#10b981")
+        campaign_tag_name = args.campaign_tag
 
     tag_ids_by_name: dict[str, str] = {
-        args.customer_tag.casefold(): customer_tag_id,
-        args.campaign_tag.casefold(): campaign_tag_id,
+        campaign_tag_name.casefold(): campaign_tag_id,
     }
+    if customer_tag_id:
+        tag_ids_by_name[args.customer_tag.casefold()] = customer_tag_id
     for contact in contacts:
         for tag_name in contact["tags"]:
             key = str(tag_name).casefold()
@@ -366,7 +402,9 @@ def main() -> None:
     contacts_by_phone = {str(contact["phone"]): contact for contact in contacts}
     for phone, row in all_contacts_by_phone.items():
         contact = contacts_by_phone.get(phone, {})
-        tag_names = [args.customer_tag, args.campaign_tag, *(contact.get("tags") or [])]
+        tag_names = [campaign_tag_name, *(contact.get("tags") or [])]
+        if customer_tag_id:
+            tag_names.insert(0, args.customer_tag)
         for tag_name in tag_names:
             tag_id = tag_ids_by_name[str(tag_name).casefold()]
             pair = (row["id"], tag_id)
@@ -379,8 +417,9 @@ def main() -> None:
     print(f"Imported/checked {len(contacts)} contacts from {xlsx_path.name}")
     print(f"Resolved contacts: {len(all_contacts_by_phone)}")
     print(f"Added contact_tags rows: {len(tag_rows)}")
-    print(f"Customer tag: {args.customer_tag} ({customer_tag_id})")
-    print(f"Campaign tag: {args.campaign_tag} ({campaign_tag_id})")
+    if customer_tag_id:
+        print(f"Customer tag: {args.customer_tag} ({customer_tag_id})")
+    print(f"Campaign tag: {campaign_tag_name} ({campaign_tag_id})")
 
 
 if __name__ == "__main__":
