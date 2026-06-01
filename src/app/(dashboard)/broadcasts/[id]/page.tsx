@@ -133,6 +133,7 @@ function FunnelChart({ steps }: { steps: FunnelStep[] }) {
 
 const RECIPIENT_STATUSES: readonly RecipientStatus[] = [
   'pending',
+  'retrying',
   'sent',
   'delivered',
   'read',
@@ -354,6 +355,29 @@ export default function BroadcastDetailPage() {
           customValueIndex.get(recipient.contact!.id),
         ),
       }));
+
+      await supabase
+        .from('broadcast_recipients')
+        .update({
+          status: 'retrying',
+          error_message: 'Retrying after rate limit',
+        })
+        .in(
+          'id',
+          retryPayload.map((recipient) => recipient.recipientId),
+        );
+
+      setRecipients((current) =>
+        current.map((recipient) =>
+          retryPayload.some((retry) => retry.recipientId === recipient.id)
+            ? {
+                ...recipient,
+                status: 'retrying',
+                error_message: 'Retrying after rate limit',
+              }
+            : recipient,
+        ),
+      );
 
       const response = await fetch('/api/whatsapp/broadcast', {
         method: 'POST',

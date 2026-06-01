@@ -9,11 +9,6 @@ import {
   phoneVariants,
   isRecipientNotAllowedError,
 } from '@/lib/whatsapp/phone-utils'
-import {
-  checkRateLimit,
-  rateLimitResponse,
-  RATE_LIMITS,
-} from '@/lib/rate-limit'
 
 export async function POST(request: Request) {
   try {
@@ -29,13 +24,6 @@ export async function POST(request: Request) {
         { error: 'Unauthorized' },
         { status: 401 }
       )
-    }
-
-    // Per-user rate limit. Bucket key is scoped to this route so
-    // `/broadcast` has an independent budget.
-    const limit = checkRateLimit(`send:${user.id}`, RATE_LIMITS.send)
-    if (!limit.success) {
-      return rateLimitResponse(limit)
     }
 
     const body = await request.json()

@@ -44,6 +44,7 @@ describe("getRecipientStatus", () => {
       recipientStatusConfig.delivered,
     );
     expect(getRecipientStatus("read")).toBe(recipientStatusConfig.read);
+    expect(getRecipientStatus("retrying")).toBe(recipientStatusConfig.retrying);
   });
 
   it("falls back to pending on an unknown status string", () => {
